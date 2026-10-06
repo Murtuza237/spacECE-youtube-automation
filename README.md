@@ -39,6 +39,7 @@ node run-pipeline.js --topic "Early Childhood Education Tips"
 - FFmpeg (installed via system PATH or bundled via `ffmpeg-static`)
 - A Google Cloud project with YouTube Data API v3 enabled
 - A Groq API key ([console.groq.com](https://console.groq.com/keys))
+- Piper TTS Models (Download `en_US-lessac-high.onnx`, `en_US-ryan-high.onnx`, and `en_US-hfc_female-medium.onnx` with their `.json` config files into `models/piper-voices/`)
 
 ### Configuration
 
