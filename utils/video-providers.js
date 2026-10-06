@@ -5,7 +5,7 @@ const axios = require('axios');
 
 // v1: slideshow-only — paid providers are kept as stubs (always unavailable)
 // so the rest of the codebase that references them doesn't break.
-const DEFAULT_PROVIDER_ORDER = ['slideshow'];
+const DEFAULT_PROVIDER_ORDER = ['stockfootage', 'slideshow'];
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value)));
 
@@ -141,6 +141,13 @@ class SlideshowProvider extends VideoProvider {
   isAvailable() { return true; }
 }
 
+class StockFootageProvider extends VideoProvider {
+  constructor() {
+    super('stockfootage', { model: 'pexels-pixabay', capabilities: { local: true, text: true, maxDuration: Infinity } });
+  }
+  isAvailable() { return Boolean(process.env.PEXELS_API_KEY || process.env.PIXABAY_API_KEY); }
+}
+
 // ─── Registry ────────────────────────────────────────────────────────────────
 
 class VideoProviderRegistry {
@@ -152,6 +159,7 @@ class VideoProviderRegistry {
       ['google_omni', injected.google_omni || new GoogleOmniProvider()],
       ['kling', injected.kling || new KlingProvider()],
       ['wan', injected.wan || new WanProvider()],
+      ['stockfootage', injected.stockfootage || new StockFootageProvider()],
       ['slideshow', injected.slideshow || new SlideshowProvider()]
     ]);
   }

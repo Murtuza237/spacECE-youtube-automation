@@ -46,6 +46,10 @@ class AIVideoGenerator {
       }
     }
     
+    // Piper configuration
+    this.piperBinaryPath = process.env.PIPER_BINARY_PATH || './tools/piper/piper';
+    this.piperVoiceModel = process.env.PIPER_VOICE_MODEL || './models/piper-voices/en_US-lessac-high.onnx';
+    
     // ElevenLabs configuration
     this.elevenLabsApiKey = resolvedCredentials.elevenLabs?.apiKey || process.env.ELEVENLABS_API_KEY;
     this.elevenLabsVoiceId = resolvedCredentials.elevenLabs?.voiceId || process.env.ELEVENLABS_VOICE_ID;
@@ -66,21 +70,36 @@ class AIVideoGenerator {
     let model = null;
 
     try {
-      let generatedPath;
-      if (this.elevenLabsApiKey && this.elevenLabsVoiceId) {
-        provider = 'elevenlabs';
-        model = this.elevenLabsModel;
-        generatedPath = await this.generateElevenLabsTTS(text, outputPath);
-      } else if (this.openai) {
-        provider = 'openai';
-        model = 'gpt-4o-mini-tts';
-        generatedPath = await this.generateOpenAITTS(text, outputPath);
-      } else if (this.gemini) {
-        provider = 'gemini';
-        model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
-        generatedPath = await this.generateGeminiTTS(text, outputPath);
-      } else {
-        generatedPath = await this.simulateTTSGeneration(text, outputPath);
+      let generatedPath = null;
+      
+      const piperAvailable = await this.isPiperAvailable();
+      if (piperAvailable) {
+        try {
+          provider = 'piper';
+          model = path.basename(this.piperVoiceModel);
+          generatedPath = await this.generatePiperTTS(text, outputPath);
+        } catch (piperErr) {
+          this.logger.warn(`Piper TTS failed (${piperErr.message}), falling back to next provider`);
+          generatedPath = null;
+        }
+      }
+      
+      if (!generatedPath) {
+        if (this.elevenLabsApiKey && this.elevenLabsVoiceId) {
+          provider = 'elevenlabs';
+          model = this.elevenLabsModel;
+          generatedPath = await this.generateElevenLabsTTS(text, outputPath);
+        } else if (this.openai) {
+          provider = 'openai';
+          model = 'gpt-4o-mini-tts';
+          generatedPath = await this.generateOpenAITTS(text, outputPath);
+        } else if (this.gemini) {
+          provider = 'gemini';
+          model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
+          generatedPath = await this.generateGeminiTTS(text, outputPath);
+        } else {
+          generatedPath = await this.simulateTTSGeneration(text, outputPath);
+        }
       }
 
       const usable = await this.isUsableAudioFile(generatedPath);
@@ -104,6 +123,42 @@ class AIVideoGenerator {
       this.logger.error('TTS generation failed:', error);
       throw error;
     }
+  }
+
+  async isPiperAvailable() {
+    try {
+      await fs.access(this.piperBinaryPath);
+      await fs.access(this.piperVoiceModel);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async generatePiperTTS(text, outputPath) {
+    const { spawn } = require('child_process');
+    return new Promise((resolve, reject) => {
+      const piper = spawn(this.piperBinaryPath, [
+        '--model', this.piperVoiceModel,
+        '--output_file', outputPath
+      ]);
+
+      let stderr = '';
+      piper.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+      piper.on('error', reject);
+      piper.on('close', (code) => {
+        if (code === 0) {
+          this.logger.info('Piper TTS generation complete');
+          resolve(outputPath);
+        } else {
+          reject(new Error(`Piper exited with code ${code}: ${stderr}`));
+        }
+      });
+
+      piper.stdin.write(text);
+      piper.stdin.end();
+    });
   }
 
   async generateElevenLabsTTS(text, outputPath) {
@@ -357,6 +412,12 @@ class AIVideoGenerator {
         }
       }
 
+      if (process.env.VIDEO_VISUAL_SOURCE === 'stock' && visualAssets.length > 0) {
+        const produced = await this.generateVideoFromAssets(script, visualAssets, audioPath, outputPath);
+        this.lastVideoResult = { requestedProvider: 'stockfootage', actualProvider: 'stockfootage', model: 'local-ffmpeg', mode: 'stock-hybrid', generatedSeconds: 0, tasks: [], scenes: [] };
+        return produced;
+      }
+
       const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath);
       this.lastVideoResult = { requestedProvider: 'slideshow', actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'slideshow', generatedSeconds: 0, tasks: [], scenes: [] };
       return produced;
@@ -405,17 +466,36 @@ class AIVideoGenerator {
     return outputPath;
   }
 
-  async renderMediaTimeline(segments, outputPath) {
+  async renderMediaTimeline(segments, outputPath, overlayImages = []) {
     const args = ['-y'];
+    
+    // Add all segment inputs
     for (const segment of segments) {
       if (segment.type === 'image') args.push('-loop', '1', '-t', Number(segment.duration).toFixed(2), '-framerate', '30', '-i', segment.path);
       else args.push('-stream_loop', '-1', '-i', segment.path);
     }
-    const filters = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
-    );
+    
+    // Add only as many overlays as we have segments
+    const usedOverlays = overlayImages.slice(0, segments.length);
+    for (const overlay of usedOverlays) {
+      if (overlay) {
+        args.push('-loop', '1', '-t', '1000', '-i', overlay);
+      }
+    }
+    
+    const filters = segments.map((segment, index) => {
+      let baseFilter = `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[base${index}]`;
+      
+      if (usedOverlays[index]) {
+        const overlayInputIndex = segments.length + index;
+        return `${baseFilter};[base${index}][${overlayInputIndex}:v]overlay=0:0:shortest=1[v${index}]`;
+      }
+      return `${baseFilter};[base${index}]copy[v${index}]`;
+    });
+    
     filters.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
     args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', outputPath);
+    
     await runFFmpeg(args);
     return outputPath;
   }
@@ -464,6 +544,44 @@ class AIVideoGenerator {
 
     return outputPath;
   }
+  async generateVideoFromAssets(script, visualAssets, audioPath, outputPath) {
+    const videoExtensions = new Set(['.mp4', '.mov', '.webm']);
+    const overlays = await this.generateTextOverlays(script, outputPath);
+    
+    // Attempt to get exact audio duration using ffprobe for perfect sync
+    let totalDuration = this.calculateScriptDuration(script);
+    try {
+      const { execFile } = require('child_process');
+      const { promisify } = require('util');
+      const { stdout } = await promisify(execFile)('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath]);
+      const probed = parseFloat(stdout.trim());
+      if (probed > 0) totalDuration = probed;
+    } catch (e) {
+      this.logger.warn('Failed to probe exact audio duration, using estimated duration instead.');
+    }
+
+    const segments = [];
+    const sectionCount = Math.max(1, overlays.length || visualAssets.length);
+    const slideDurations = this.calculateSlideDurations(script, totalDuration, sectionCount);
+
+    // Loop visual assets to perfectly match the number of sections (slides/overlays)
+    for (let i = 0; i < sectionCount; i++) {
+      const assetPath = visualAssets[i % Math.max(1, visualAssets.length)];
+      const isVideo = assetPath && videoExtensions.has(path.extname(assetPath).toLowerCase());
+      segments.push({ type: isVideo ? 'video' : 'image', path: assetPath, duration: slideDurations[i] });
+    }
+
+    const visualPath = outputPath.replace(/\.mp4$/i, '_stock_visual.mp4');
+    
+    await this.renderMediaTimeline(segments, visualPath, overlays);
+    await this.addAudioToVideo(visualPath, audioPath, outputPath, { loopVideo: true, allowSilent: true });
+    
+    await fs.unlink(visualPath).catch(() => {});
+    await this.cleanupDirectory(path.dirname(overlays[0] || '')).catch(() => {});
+    
+    return outputPath;
+  }
+
 
   async generateSlideshowVideo(script, visualAssets, audioPath, outputPath) {
     this.logger.info('Creating slideshow video...');
@@ -520,13 +638,52 @@ class AIVideoGenerator {
     }
   }
 
+  async generateTextOverlays(script, outputPath) {
+    const { chromium } = require('playwright');
+    const browser = await chromium.launch();
+    const slidesDir = path.join(path.dirname(outputPath), 'overlays');
+
+    try {
+      const page = await browser.newPage();
+      await page.setViewportSize({ width: 1920, height: 1080 });
+
+      // Create HTML with NO images, but with transparent body background
+      const html = this.createSlideshowHTML(script, []);
+      await page.setContent(html + '<style>body { background: transparent !important; }</style>');
+
+      // Freeze CSS transitions/animations
+      await page.addStyleTag({ content: '* { transition: none !important; animation: none !important; }' });
+      await page.waitForTimeout(1000);
+
+      const slideCount = await page.evaluate(() => document.querySelectorAll('.slide').length);
+      await fs.mkdir(slidesDir, { recursive: true });
+
+      const stills = [];
+      for (let i = 0; i < slideCount; i++) {
+        await page.evaluate((index) => {
+          document.querySelectorAll('.slide').forEach((slide, s) => {
+            slide.classList.toggle('active', s === index);
+          });
+        }, i);
+
+        const stillPath = path.join(slidesDir, `overlay_${String(i).padStart(3, '0')}.png`);
+        await page.screenshot({ path: stillPath, omitBackground: true });
+        stills.push(stillPath);
+      }
+
+      return stills;
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  }
+
   async renderSlidesToVideo(stills, totalDuration, videoPath) {
     if (stills.length === 0) {
       throw new Error('No slides to render');
     }
 
     const fade = 0.5;
-    const perSlide = Math.max(2, totalDuration / stills.length);
+    const perSlide = Math.min(10, Math.max(2, totalDuration / stills.length));
 
     const args = ['-y'];
     for (const still of stills) {
@@ -758,7 +915,7 @@ class AIVideoGenerator {
   formatSectionContent(section) {
     if (section.items && Array.isArray(section.items)) {
       return section.items.slice(0, 3).map(item => 
-        `<p>${item.number}. ${item.title}</p>`
+        `<p>${item.number ? item.number + '. ' : ''}${item.title}</p>${item.description ? '<p style="font-size: 0.8em; opacity: 0.8">' + item.description + '</p>' : ''}`
       ).join('');
     }
     
@@ -768,11 +925,14 @@ class AIVideoGenerator {
       ).join('');
     }
     
+    if (Array.isArray(section.content)) {
+      return section.content.map(p => `<p>${p}</p>`).join('');
+    }
     if (typeof section.content === 'string') {
       return `<p>${section.content.slice(0, 200)}${section.content.length > 200 ? '...' : ''}</p>`;
     }
     
-    return '<p>Content coming soon...</p>';
+    return '';
   }
 
   calculateScriptDuration(script) {
@@ -789,6 +949,8 @@ class AIVideoGenerator {
       script.mainContent.sections.forEach(section => {
         if (typeof section.content === 'string') {
           totalWords += section.content.split(' ').length;
+        } else if (Array.isArray(section.content)) {
+          totalWords += section.content.join(' ').split(' ').length;
         }
         if (section.items) {
           section.items.forEach(item => {
@@ -807,8 +969,69 @@ class AIVideoGenerator {
       totalWords += script.conclusion.finalThought.split(' ').length;
     }
     
-    // Convert to duration (150 words per minute)
-    return Math.max(30, Math.ceil((totalWords / 150) * 60));
+    return Math.max(10, Math.ceil(totalWords / 2.5)); // Fallback assumption
+  }
+
+  calculateSlideDurations(script, totalDuration, slideCount) {
+    const wordCounts = new Array(slideCount).fill(0);
+    const count = (text) => (typeof text === 'string' ? text.split(/\s+/).filter(w => w.length > 0).length : 0);
+
+    if (slideCount > 0) {
+      if (script.hook) wordCounts[0] += count(script.hook.text);
+      if (script.introduction) {
+        wordCounts[0] += count(script.introduction.greeting);
+        wordCounts[0] += count(script.introduction.topicIntro);
+        wordCounts[0] += count(script.introduction.valueProposition);
+        wordCounts[0] += count(script.introduction.credibility);
+      }
+    }
+
+    if (script.mainContent && script.mainContent.sections) {
+      script.mainContent.sections.forEach((section, index) => {
+        const slideIndex = Math.min(index + 1, slideCount - 2); 
+        if (slideIndex > 0 && slideIndex < slideCount) {
+          wordCounts[slideIndex] += count(`Section ${index + 1}: ${section.title}`);
+          if (Array.isArray(section.content)) {
+            section.content.forEach(line => {
+              if (typeof line === 'string' && !line.startsWith('[')) wordCounts[slideIndex] += count(line);
+            });
+          } else if (section.steps) {
+            section.steps.forEach(step => {
+              wordCounts[slideIndex] += count(`${step.title}. ${step.description} ${step.tip}`);
+            });
+          } else if (section.items) {
+            section.items.forEach(item => {
+              wordCounts[slideIndex] += count(`Number ${item.number}: ${item.title}. ${item.description}`);
+            });
+          } else if (typeof section.content === 'string') {
+            wordCounts[slideIndex] += count(section.content);
+          }
+        }
+      });
+    }
+
+    const lastSlide = slideCount - 1;
+    if (lastSlide > 0) {
+      if (script.conclusion) {
+        if (Array.isArray(script.conclusion.recap)) {
+          script.conclusion.recap.forEach(line => wordCounts[lastSlide] += count(line));
+        }
+        wordCounts[lastSlide] += count(script.conclusion.finalThought);
+      }
+      if (script.callToAction) {
+        wordCounts[lastSlide] += count(script.callToAction.subscribe);
+        wordCounts[lastSlide] += count(script.callToAction.like);
+        wordCounts[lastSlide] += count(script.callToAction.comment);
+      }
+    }
+
+    // Give empty slides a tiny weight of 1 word so they don't disappear completely
+    for (let i = 0; i < slideCount; i++) {
+      if (wordCounts[i] === 0) wordCounts[i] = 1;
+    }
+
+    const totalWords = wordCounts.reduce((sum, w) => sum + w, 0);
+    return wordCounts.map(w => totalDuration * (w / totalWords));
   }
 
   async addAudioToVideo(videoPath, audioPath, outputPath, options = {}) {
@@ -830,7 +1053,11 @@ class AIVideoGenerator {
       ? outputPath.replace(/\.mp4$/i, '_muxed.mp4')
       : outputPath;
 
-    const videoInput = options.loopVideo ? ['-stream_loop', '-1', '-i', videoPath] : ['-i', videoPath];
+    // We intentionally ignore options.loopVideo here because the visualPath was already 
+    // explicitly rendered to match the total script duration. Using -stream_loop -1 
+    // combined with -c:v copy and -shortest triggers a known FFmpeg bug that fills 
+    // the disk with hundreds of GBs of copied video packets before the audio is read.
+    const videoInput = ['-i', videoPath];
     await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxPath]);
 
     if (muxPath !== outputPath) {
