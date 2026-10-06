@@ -165,7 +165,7 @@ class CredentialManager {
   async setupGroqCredentials() {
     console.log(chalk.cyan('\n🤖 Groq API Setup'));
     console.log(chalk.gray('Get your API key from: https://console.groq.com/keys'));
-    console.log(chalk.gray('Using Llama 3.3 70B Versatile via Groq\'s OpenAI-compatible endpoint'));
+    console.log(chalk.gray('Using openai/gpt-oss-120b via Groq\'s OpenAI-compatible endpoint'));
 
     const answers = await inquirer.prompt([
       {
