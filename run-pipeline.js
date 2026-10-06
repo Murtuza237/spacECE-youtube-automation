@@ -82,7 +82,7 @@ async function main() {
   console.log(chalk.gray('═'.repeat(60)));
   console.log(chalk.white(`📋 Topic: ${topic}`));
   console.log(chalk.white(`🎥 Video path: slideshow (local FFmpeg)`));
-  console.log(chalk.white(`🤖 AI provider: Groq (Llama 3.3 70B)`));
+  console.log(chalk.white(`🤖 AI provider: Groq (openai/gpt-oss-120b)`));
   console.log(chalk.white(`🔒 Privacy: PRIVATE (Phase 1)`));
   console.log(chalk.gray('═'.repeat(60)));
 
@@ -175,6 +175,8 @@ async function main() {
     console.log(chalk.gray(`   Scheduled: ${result.scheduledPublishTime}`));
     return result;
   });
+
+  seoOptimizer.appendAttribution(production);
 
   // ── Pre-publish summary ────────────────────────────────────────────────
 

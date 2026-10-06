@@ -93,7 +93,7 @@ class OAuthServer {
     
     // Import and start the main application
     const { spawn } = require('child_process');
-    const mainApp = spawn('node', ['index.js'], {
+    const mainApp = spawn('node', ['run-pipeline.js'], {
       stdio: 'inherit',
       cwd: __dirname
     });
