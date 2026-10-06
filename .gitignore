@@ -87,3 +87,7 @@ data/scripts/
 data/videos/
 data/thumbnails/
 data/production/
+
+# Piper TTS
+tools/piper/
+models/piper-voices/
