@@ -300,6 +300,14 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     return description;
   }
 
+  appendAttribution(productionData) {
+    if (productionData?.assets?.video?.generatedWith === 'stock-footage') {
+      if (productionData.seo && productionData.seo.description) {
+        productionData.seo.description += '\nB-roll footage via Pexels / Pixabay.\n';
+      }
+    }
+  }
+
   async generateTags(script, strategy) {
     const tags = new Set();
     

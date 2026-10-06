@@ -299,11 +299,21 @@ class ProductionManagementAgent {
     try {
       const { script } = productionData;
       
-      // Generate visual assets using DALL-E
       const visualPrompts = this.createVisualPromptsFromScript(script);
       const visualAssets = [];
+      const useStock = (process.env.VIDEO_VISUAL_SOURCE || 'stock') === 'stock';
+      const stockService = useStock ? new (require('../utils/stock-footage-service').StockFootageService)() : null;
       
-      for (const prompt of visualPrompts) {
+      for (const [index, prompt] of visualPrompts.entries()) {
+        if (stockService?.isAvailable()) {
+          const clip = await stockService.getSceneClip(prompt, path.join(__dirname, '..', 'data', 'temp'), index);
+          if (clip) {
+            visualAssets.push(clip.path);
+            this.logger.info(`Scene ${index}: stock clip from ${clip.source}`);
+            continue;
+          }
+          this.logger.warn(`Scene ${index}: no stock match for "${prompt}", falling back to AI image`);
+        }
         const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, 'ethereal', 1);
         visualAssets.push(...assets);
       }
@@ -314,7 +324,7 @@ class ProductionManagementAgent {
         format: 'mp4',
         resolution: '1920x1080',
         fps: 30,
-        generatedWith: 'AI'
+        generatedWith: useStock ? 'stock-footage' : 'AI'
       };
       
       productionData.timeline.videoGenerated = new Date().toISOString();
@@ -443,7 +453,9 @@ class ProductionManagementAgent {
         generatedAt: evidence.generatedAt || new Date().toISOString(),
         cost: evidence.cost || {},
         error: usable ? null : 'No live narration provider returned usable audio',
-        intentionalSilence: !usable // v1: Allow silent video to proceed
+        intentionalSilence: !usable, // v1: Allow silent video to proceed
+        silenceReason: !usable ? 'No live TTS provider available in Phase 1 (Groq only mode)' : null,
+        silenceConfirmedAt: !usable ? new Date().toISOString() : null
       };
 
       if (usable) productionData.timeline.audioGenerated = new Date().toISOString();
@@ -699,7 +711,9 @@ class ProductionManagementAgent {
       generatedAt: this.aiVideoGenerator.lastNarrationResult?.generatedAt || new Date().toISOString(),
       cost: this.aiVideoGenerator.lastNarrationResult?.cost || { billed: false },
       error: failure?.message || this.aiVideoGenerator.lastNarrationResult?.error || 'No live narration provider is configured',
-      intentionalSilence: false
+      intentionalSilence: true, // v1: Allow silent video
+      silenceReason: 'No live TTS provider available in Phase 1 (Groq only mode)',
+      silenceConfirmedAt: new Date().toISOString()
     };
     
     return audioPath + '.info';
